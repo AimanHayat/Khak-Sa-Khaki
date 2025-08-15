@@ -1,0 +1,220 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Khak Sa Khaki ⏳</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root{--ui-h:56px;--gap:10px}
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial}
+    header{height:var(--ui-h);display:flex;align-items:center;justify-content:space-between;padding:0 14px;background:#f5f5f5;border-bottom:1px solid #e9e9e9}
+    .controls{display:flex;gap:8px;align-items:center}
+    button,input,select{font:inherit;padding:6px 8px;border-radius:6px;border:1px solid #d0d0d0;background:white}
+    .viewer {display:flex;height:calc(100vh - var(--ui-h));gap:var(--gap)}
+    .left {width:280px;max-width:30%;min-width:180px;border-right:1px solid #eee;overflow:auto;padding:12px;background:#fafafa}
+    .thumb{cursor:pointer;border-radius:6px;border:1px solid transparent;padding:6px;margin-bottom:8px;display:flex;gap:8px;align-items:center}
+    .thumb.selected{border-color:#2b6cb0;background:#e9f2ff}
+    .thumb canvas{width:80px;height:auto;display:block}
+    .right{flex:1;display:flex;align-items:center;justify-content:center;background:#fff}
+    #pdf-canvas{box-shadow:0 2px 10px rgba(0,0,0,0.08);max-width:100%;height:auto}
+    .meta{font-size:13px;color:#444}
+    .small{font-size:12px;color:#666}
+    @media(max-width:800px){
+      .left{display:none}
+    }
+  </style>
+
+  <!-- Use a stable CDN build of PDF.js (cdnjs is reliable) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+</head>
+<body>
+  <header>
+    <div>
+      <strong>Khak Sa Khaki</strong>
+      <div class="small">Book viewer — 288 pages</div>
+    </div>
+
+    <div class="controls">
+      <button id="prevBtn" title="Previous page">◀</button>
+      <input id="pageNum" type="number" min="1" value="1" style="width:68px" />
+      <div class="small">/ <span id="pageCount">--</span></div>
+      <button id="nextBtn" title="Next page">▶</button>
+
+      <select id="zoom">
+        <option value="0.8">80%</option>
+        <option value="1.0" selected>100%</option>
+        <option value="1.25">125%</option>
+        <option value="1.5">150%</option>
+        <option value="2">200%</option>
+      </select>
+
+      <!-- <a id="openRaw" class="btn" href="#" target="_blank"><button>Open Raw</button></a> -->
+      <a id="downloadBtn" href="#" download><button>Download</button></a>
+    </div>
+  </header>
+
+  <div class="viewer">
+    <aside class="left" id="thumbsPanel">
+      <div class="meta">Thumbnails (click to jump)</div>
+      <div id="thumbsContainer"></div>
+      <div style="margin-top:8px">
+        <button id="loadMoreThumbs">Load more thumbnails</button>
+        <div class="small" style="margin-top:6px">Thumbnails are generated lazily to avoid heavy memory use.</div>
+      </div>
+    </aside>
+
+    <main class="right">
+      <canvas id="pdf-canvas"></canvas>
+    </main>
+  </div>
+  
+<script>
+(async function(){
+  // === CONFIG ===
+  const pdfUrl = "Khak_Sa_Khaki.pdf"; // <-- put your PDF next to this index.html or change path
+  const THUMBS_BATCH = 30; // generate thumbnails in batches of N pages (tweak if needed)
+  // ====
+  // Try to pick the global pdfjs object regardless of CDN build name
+  const pdfjsLib = window['pdfjsLib'] || window['pdfjs-dist/build/pdf'] || window['pdfjs-dist/build/pdf.min'];
+  if (!pdfjsLib) {
+    alert('Failed to load PDF.js library. Make sure the CDN script is reachable.');
+    return;
+  }
+
+  // point worker to CDN build (match the PDF.js version above if you change it)
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+
+  let pdfDoc = null;
+  let currentPage = 1;
+  let scale = 1.0;
+  const canvas = document.getElementById('pdf-canvas');
+  const ctx = canvas.getContext('2d');
+  const pageNumInput = document.getElementById('pageNum');
+  const pageCountSpan = document.getElementById('pageCount');
+  const prevBtn = document.getElementById('prevBtn');
+  const nextBtn = document.getElementById('nextBtn');
+  const zoomSel = document.getElementById('zoom');
+  const downloadBtn = document.getElementById('downloadBtn');
+//   const openRaw = document.getElementById('openRaw');
+
+  // Thumbnails
+  const thumbsContainer = document.getElementById('thumbsContainer');
+  const loadMoreThumbsBtn = document.getElementById('loadMoreThumbs');
+  let thumbsGenerated = 0;
+
+  // load PDF (allow server to handle range requests for performance)
+  const loadingTask = pdfjsLib.getDocument({ url: pdfUrl, maxImageSize: 1024*1024*5 });
+  try {
+    pdfDoc = await loadingTask.promise;
+  } catch (err) {
+    console.error('Error loading PDF:', err);
+    alert('Error loading PDF: ' + (err && err.message ? err.message : err));
+    return;
+  }
+
+  pageCountSpan.textContent = pdfDoc.numPages;
+  pageNumInput.max = pdfDoc.numPages;
+  downloadBtn.href = pdfUrl;
+//   openRaw.href = pdfUrl;
+
+  async function renderPage(num){
+    const page = await pdfDoc.getPage(num);
+    const viewport = page.getViewport({ scale: scale });
+    canvas.width = Math.floor(viewport.width);
+    canvas.height = Math.floor(viewport.height);
+
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+
+    const renderContext = { canvasContext: ctx, viewport: viewport };
+    const renderTask = page.render(renderContext);
+    await renderTask.promise;
+
+    pageNumInput.value = num;
+    highlightSelectedThumb(num);
+    if (window.innerWidth < 800) canvas.scrollIntoView({behavior:'smooth',block:'center'});
+  }
+
+  prevBtn.onclick = () => {
+    if (currentPage <= 1) return;
+    currentPage--;
+    renderPage(currentPage);
+  };
+  nextBtn.onclick = () => {
+    if (currentPage >= pdfDoc.numPages) return;
+    currentPage++;
+    renderPage(currentPage);
+  };
+  pageNumInput.onchange = () => {
+    let v = parseInt(pageNumInput.value) || 1;
+    v = Math.min(Math.max(1, v), pdfDoc.numPages);
+    currentPage = v;
+    renderPage(currentPage);
+  };
+  zoomSel.onchange = () => {
+    scale = parseFloat(zoomSel.value);
+    renderPage(currentPage);
+  };
+
+  function makeThumbCanvas(page, desiredWidth=100){
+    const viewport1 = page.getViewport({ scale: 1 });
+    const thumbScale = desiredWidth / viewport1.width;
+    const viewport = page.getViewport({ scale: thumbScale });
+    const c = document.createElement('canvas');
+    c.width = Math.floor(viewport.width);
+    c.height = Math.floor(viewport.height);
+    const ctx2 = c.getContext('2d');
+    return page.render({ canvasContext: ctx2, viewport }).promise.then(()=>c);
+  }
+
+  async function generateThumb(pageNumber){
+    const page = await pdfDoc.getPage(pageNumber);
+    const thumbCanvas = await makeThumbCanvas(page, 120);
+    const wrapper = document.createElement('div');
+    wrapper.className = 'thumb';
+    wrapper.dataset.p = pageNumber;
+    const label = document.createElement('div');
+    label.className = 'small';
+    label.textContent = `Page ${pageNumber}`;
+    wrapper.appendChild(thumbCanvas);
+    wrapper.appendChild(label);
+    wrapper.onclick = () => { currentPage = pageNumber; renderPage(currentPage); };
+    thumbsContainer.appendChild(wrapper);
+  }
+
+  async function loadMoreThumbs(){
+    loadMoreThumbsBtn.disabled = true;
+    const start = thumbsGenerated + 1;
+    const end = Math.min(pdfDoc.numPages, thumbsGenerated + THUMBS_BATCH);
+    for (let p = start; p <= end; ++p){
+      // small await keeps UI responsive
+      await generateThumb(p);
+    }
+    thumbsGenerated = end;
+    if (thumbsGenerated >= pdfDoc.numPages) loadMoreThumbsBtn.style.display = 'none';
+    loadMoreThumbsBtn.disabled = false;
+  }
+  loadMoreThumbsBtn.onclick = loadMoreThumbs;
+
+  function highlightSelectedThumb(p){
+    const children = thumbsContainer.children;
+    for (let i=0;i<children.length;i++){
+      const el = children[i];
+      el.classList.toggle('selected', el.dataset.p == p);
+    }
+  }
+
+  currentPage = 1;
+  scale = parseFloat(zoomSel.value);
+  await renderPage(currentPage);
+  loadMoreThumbs();
+
+  window.addEventListener('keydown',(ev)=>{
+    if (ev.key === 'ArrowRight') nextBtn.click();
+    if (ev.key === 'ArrowLeft') prevBtn.click();
+  });
+
+})();
+</script>
+</body>
+</html>
